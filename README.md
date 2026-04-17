@@ -55,8 +55,8 @@ ollama pull gemma2
 ### 1 — Clone / download
 
 ```bash
-git clone <your-repo>
-cd vectorless_rag
+git clone https://github.com/Sdinzsh/RAG.git
+cd RAG
 ```
 
 ### 2 — Install dependencies
