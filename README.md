@@ -99,7 +99,7 @@ Open **http://localhost:5000** in your browser.
 ## 📁 Project Structure
 
 ```
-vectorless_rag/
+RAG/
 ├── app.py              ← Flask backend + REST API
 ├── rag_engine.py       ← Core RAG logic
 │   ├── build_document_tree()   ← PDF → Section tree
