@@ -16,9 +16,11 @@ from werkzeug.utils import secure_filename
 
 from rag_engine import (
     build_document_tree,
+    load_cached_tree,
     answer_query_stream,
     list_ollama_models,
     DEFAULT_MODEL,
+    SUPPORTED_EXT,
     DocumentTree,
 )
 
@@ -63,39 +65,69 @@ def api_upload():
         return jsonify({"error": "No file provided"}), 400
 
     f = request.files["file"]
-    if not f.filename or not f.filename.lower().endswith(".pdf"):
-        return jsonify({"error": "Only PDF files are supported"}), 400
+    if not f.filename:
+        return jsonify({"error": "No filename"}), 400
+
+    ext = "." + f.filename.rsplit(".", 1)[-1].lower() if "." in f.filename else ""
+    if ext not in SUPPORTED_EXT:
+        return jsonify({
+            "error": f"Unsupported type '{ext}'. Supported: {', '.join(SUPPORTED_EXT)}"
+        }), 400
 
     model = request.form.get("model", DEFAULT_MODEL)
 
-    # Save PDF
-    filename  = secure_filename(f.filename)
-    pdf_path  = UPLOAD_FOLDER / filename
-    f.save(str(pdf_path))
+    # Save file
+    filename = secure_filename(f.filename)
+    in_path  = UPLOAD_FOLDER / filename
+    f.save(str(in_path))
 
     try:
-        tree = build_document_tree(str(pdf_path), filename)
+        tree = build_document_tree(str(in_path), filename)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
-        logger.exception("Failed to parse PDF")
-        return jsonify({"error": f"Failed to parse PDF: {e}"}), 500
+        logger.exception("Failed to parse file")
+        return jsonify({"error": f"Failed to parse file: {e}"}), 500
 
-    # Create session
+    session_id = _open_session(tree, model)
+    return jsonify(_session_payload(session_id, tree))
+
+
+# ── /api/doc/<doc_id> — resume a cached document (no re-parse) ──
+@app.route("/api/doc/<doc_id>")
+def api_doc(doc_id: str):
+    tree = load_cached_tree(doc_id)
+    if tree is None:
+        return jsonify({"error": "Document not found in cache"}), 404
+    model = request.args.get("model", DEFAULT_MODEL)
+    session_id = _open_session(tree, model)
+    return jsonify(_session_payload(session_id, tree))
+
+
+# ── helpers ────────────────────────────────────────────────────
+def _open_session(tree: DocumentTree, model: str) -> str:
     session_id = str(uuid.uuid4())
     SESSIONS[session_id] = {
         "tree":    tree,
         "model":   model,
         "history": [],
     }
+    return session_id
 
+
+def _session_payload(session_id: str, tree: DocumentTree) -> dict:
     section_info = [s.to_dict() for s in tree.all_sections()]
-    return jsonify({
-        "session_id":   session_id,
-        "filename":     filename,
-        "total_pages":  tree.total_pages,
+    return {
+        "session_id":     session_id,
+        "doc_id":         tree.doc_id,
+        "cached":         tree.from_cache,
+        "filename":       tree.filename,
+        "source_format":  tree.source_format,
+        "total_pages":    tree.total_pages,
         "total_sections": len(section_info),
-        "sections":     section_info,
-        "tree_summary": tree.tree_summary(),
-    })
+        "sections":       section_info,
+        "tree_summary":   tree.tree_summary(),
+    }
 
 
 # ── /api/chat  (SSE streaming) ─────────────────────────────────
@@ -112,36 +144,46 @@ def api_chat():
 
     sess: dict = SESSIONS[session_id]
     tree:  DocumentTree  = sess["tree"]
-    model: str           = sess["model"]
     history: list[dict]  = sess["history"]
+
+    # Allow model switching mid-session
+    req_model = (body.get("model") or "").strip()
+    if req_model:
+        sess["model"] = req_model
+    model: str = sess["model"]
 
     def event_stream():
         full_answer = []
         retrieved_sections = []
 
-        for kind, data in answer_query_stream(tree, query, model, history):
-            if kind == "sections":
-                retrieved_sections = data
-                payload = json.dumps({"type": "sections", "data": data})
-                yield f"data: {payload}\n\n"
+        try:
+            for kind, data in answer_query_stream(tree, query, model, history):
+                if kind == "sections":
+                    retrieved_sections = data
+                    payload = json.dumps({"type": "sections", "data": data})
+                    yield f"data: {payload}\n\n"
 
-            elif kind == "token":
-                full_answer.append(data)
-                payload = json.dumps({"type": "token", "data": data})
-                yield f"data: {payload}\n\n"
+                elif kind == "token":
+                    full_answer.append(data)
+                    payload = json.dumps({"type": "token", "data": data})
+                    yield f"data: {payload}\n\n"
 
-            elif kind == "done":
-                # Persist to history (last 10 turns to avoid huge context)
-                answer_text = "".join(full_answer)
-                history.append({"role": "user",      "content": query})
-                history.append({"role": "assistant",  "content": answer_text})
-                sess["history"] = history[-20:]      # keep last 10 turns
+                elif kind == "done":
+                    # Persist to history (last 10 turns to avoid huge context)
+                    answer_text = "".join(full_answer)
+                    history.append({"role": "user",      "content": query})
+                    history.append({"role": "assistant",  "content": answer_text})
+                    sess["history"] = history[-20:]      # keep last 10 turns
 
-                payload = json.dumps({
-                    "type": "done",
-                    "sections": retrieved_sections,
-                })
-                yield f"data: {payload}\n\n"
+                    payload = json.dumps({
+                        "type": "done",
+                        "sections": retrieved_sections,
+                    })
+                    yield f"data: {payload}\n\n"
+        except Exception as e:
+            logger.exception("Error in event stream")
+            payload = json.dumps({"type": "error", "error": str(e)})
+            yield f"data: {payload}\n\n"
 
     return Response(
         stream_with_context(event_stream()),
@@ -178,6 +220,10 @@ def api_clear_history(session_id: str):
 
 
 # ──────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    print("\n  🌲  Vectorless RAG  —  http://localhost:5000\n")
+def main():
+    print("\n  \U0001F332  Vectorless RAG  —  http://localhost:5000\n")
     app.run(debug=True, host="0.0.0.0", port=5000, threaded=True)
+
+
+if __name__ == "__main__":
+    main()

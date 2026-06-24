@@ -695,9 +695,9 @@
   <aside class="sidebar">
     <!-- Upload -->
     <div class="upload-zone" id="uploadZone">
-      <input type="file" id="fileInput" accept=".pdf">
+      <input type="file" id="fileInput" accept=".pdf,.txt,.md,.markdown,.docx">
       <div class="upload-icon">📄</div>
-      <p><strong>Drop PDF here</strong><br>or click to browse</p>
+      <p><strong>Drop a file here</strong><br>PDF · TXT · MD · DOCX</p>
     </div>
 
     <!-- Upload progress -->
@@ -817,11 +817,13 @@ uploadZone.addEventListener('drop', e => {
 });
 fileInput.addEventListener('change', () => {
   if (fileInput.files[0]) uploadFile(fileInput.files[0]);
+  fileInput.value = '';  // reset so re-uploading the same file triggers change
 });
 
 async function uploadFile(file) {
-  if (!file.name.toLowerCase().endsWith('.pdf')) {
-    showToast('Only PDF files are supported', 'error'); return;
+  const ok = /\.(pdf|txt|md|markdown|docx)$/i.test(file.name);
+  if (!ok) {
+    showToast('Supported: PDF, TXT, MD, DOCX', 'error'); return;
   }
 
   const model = document.getElementById('modelSelect').value;
@@ -846,7 +848,8 @@ async function uploadFile(file) {
   fd.append('model', model);
 
   try {
-    status.textContent = 'Parsing PDF & building document tree…';
+    const ext = file.name.split('.').pop().toUpperCase();
+    status.textContent = `Parsing ${ext} & building document tree…`;
     const r   = await fetch('/api/upload', { method: 'POST', body: fd });
     const d   = await r.json();
 
@@ -861,8 +864,9 @@ async function uploadFile(file) {
     // Update doc info
     document.getElementById('docInfo').classList.add('visible');
     document.getElementById('docName').textContent = d.filename;
+    const fmt = (d.source_format || '').toUpperCase();
     document.getElementById('docMeta').textContent =
-      `${d.total_pages} pages · ${d.total_sections} sections`;
+      `${d.total_pages} pages · ${d.total_sections} sections` + (fmt ? ` · ${fmt}` : '');
     document.getElementById('sectionCount').textContent = d.total_sections;
 
     // Render tree
@@ -878,7 +882,8 @@ async function uploadFile(file) {
     document.getElementById('messages').classList.add('visible');
 
     setTimeout(() => prog.classList.remove('visible'), 600);
-    showToast(`✓ ${d.filename} loaded — ${d.total_sections} sections`, 'success');
+    const cachedNote = d.cached ? ' (cached · instant)' : '';
+    showToast(`✓ ${d.filename} loaded — ${d.total_sections} sections${cachedNote}`, 'success');
 
   } catch (e) {
     clearInterval(interval);
@@ -887,7 +892,7 @@ async function uploadFile(file) {
   }
 }
 
-// ── TREE RENDER ──────────────────────────────────────────────────
+// ── TREE RENDER (recursive — respects nested parent/children) ────
 function renderTree(sections) {
   const panel = document.getElementById('treePanel');
   panel.innerHTML = '';
@@ -895,20 +900,45 @@ function renderTree(sections) {
     panel.innerHTML = '<div class="tree-empty">No sections detected.</div>';
     return;
   }
-  sections.forEach(s => {
+
+  // Build lookup
+  const byId = {};
+  sections.forEach(s => byId[s.section_id] = s);
+
+  // Detect whether the tree has real nesting
+  const hasNested = sections.some(s => s.children && s.children.length > 0);
+
+  function addChild(parentEl, sec, depth) {
     const item = document.createElement('div');
     item.className = 'tree-item';
-    item.id = 'tree_' + s.section_id;
-    item.style.setProperty('--depth', String(s.level - 1));
-    const pages = s.page_start === s.page_end
-      ? `p${s.page_start}`
-      : `pp${s.page_start}–${s.page_end}`;
+    item.id = 'tree_' + sec.section_id;
+    item.style.setProperty('--depth', String(depth));
+    const pages = sec.page_start === sec.page_end
+      ? `p${sec.page_start}`
+      : `pp${sec.page_start}–${sec.page_end}`;
     item.innerHTML = `
-      <div class="tree-item-title" title="${escHtml(s.title)}">${escHtml(truncate(s.title, 45))}</div>
-      <div class="tree-item-meta">${s.section_id} · ${pages}</div>`;
-    item.onclick = () => fillQuery(s.title);
-    panel.appendChild(item);
-  });
+      <div class="tree-item-title" title="${escHtml(sec.title)}">${escHtml(truncate(sec.title, 45))}</div>
+      <div class="tree-item-meta">${sec.section_id} · ${pages}</div>`;
+    item.onclick = () => fillQuery(sec.title);
+    parentEl.appendChild(item);
+
+    if (sec.children && sec.children.length > 0) {
+      sec.children.forEach(cid => {
+        const child = byId[cid];
+        if (child) addChild(parentEl, child, depth + 1);
+      });
+    }
+  }
+
+  // Walk roots first; if a section is referenced as someone's child, skip it at top level
+  const childIds = new Set();
+  sections.forEach(s => (s.children || []).forEach(c => childIds.add(c)));
+
+  const rootSections = hasNested
+    ? sections.filter(s => !childIds.has(s.section_id))
+    : sections;
+
+  rootSections.forEach(s => addChild(panel, s, s.level ? s.level - 1 : 0));
 }
 
 function highlightSections(ids) {
@@ -965,6 +995,7 @@ async function sendQuery() {
       body: JSON.stringify({
         session_id: sessionId,
         query: q,
+        model: document.getElementById('modelSelect').value,
       }),
     });
 
@@ -1032,6 +1063,12 @@ async function sendQuery() {
               content.appendChild(bar);
             }
             setTimeout(() => pb.style.width = '0%', 400);
+          }
+
+          else if (evt.type === 'error') {
+            const content = msgEl.querySelector('.msg-content');
+            content.innerHTML = `<span style="color:var(--red)">Error: ${evt.error}</span>`;
+            pb.style.width = '0%';
           }
 
         } catch (_) {}
