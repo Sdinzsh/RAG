@@ -8,3 +8,14 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Runtime data
+cache/
+uploads/
+
+# Environment / secrets
+.env
+
+# Databases
+*.db
+*.sqlite3
