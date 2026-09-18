@@ -2,11 +2,11 @@
 Flask backend for Vectorless RAG Web UI
 """
 
-import os
 import json
 import uuid
 import logging
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from flask import (
     Flask, request, jsonify, render_template,
@@ -77,12 +77,12 @@ def api_upload():
     model = request.form.get("model", DEFAULT_MODEL)
 
     # Save file
-    filename = secure_filename(f.filename)
-    in_path  = UPLOAD_FOLDER / filename
-    f.save(str(in_path))
-
+    filename = secure_filename(f.filename) or f"document{ext}"
     try:
-        tree = build_document_tree(str(in_path), filename)
+        with TemporaryDirectory(dir=UPLOAD_FOLDER) as directory:
+            in_path = Path(directory) / filename
+            f.save(str(in_path))
+            tree = build_document_tree(str(in_path), filename)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
@@ -102,6 +102,15 @@ def api_doc(doc_id: str):
     model = request.args.get("model", DEFAULT_MODEL)
     session_id = _open_session(tree, model)
     return jsonify(_session_payload(session_id, tree))
+
+
+@app.route("/api/doc/<doc_id>/tree")
+def api_tree(doc_id: str):
+    tree = load_cached_tree(doc_id)
+    if tree is None:
+        return jsonify({"error": "Document not found; upload it to build a local tree"}), 404
+    return jsonify({"doc_id": doc_id, "filename": tree.filename,
+                    "result": tree.nested_nodes()})
 
 
 # ── helpers ────────────────────────────────────────────────────
@@ -124,6 +133,7 @@ def _session_payload(session_id: str, tree: DocumentTree) -> dict:
         "filename":       tree.filename,
         "source_format":  tree.source_format,
         "total_pages":    tree.total_pages,
+        "location_unit":  "pages" if tree.source_format == "pdf" else "blocks",
         "total_sections": len(section_info),
         "sections":       section_info,
         "tree_summary":   tree.tree_summary(),
@@ -134,20 +144,30 @@ def _session_payload(session_id: str, tree: DocumentTree) -> dict:
 @app.route("/api/chat", methods=["POST"])
 def api_chat():
     body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"error": "Expected a JSON object"}), 400
     session_id = body.get("session_id")
-    query      = (body.get("query") or "").strip()
+    query = body.get("query", "")
+    if not isinstance(query, str) or not isinstance(session_id, str):
+        return jsonify({"error": "query and session_id must be strings"}), 400
+    query = query.strip()
 
     if not session_id or session_id not in SESSIONS:
         return jsonify({"error": "Invalid or missing session_id"}), 400
     if not query:
         return jsonify({"error": "Empty query"}), 400
+    if len(query) > 4000:
+        return jsonify({"error": "Keep the question under 4000 characters"}), 400
 
     sess: dict = SESSIONS[session_id]
     tree:  DocumentTree  = sess["tree"]
     history: list[dict]  = sess["history"]
 
     # Allow model switching mid-session
-    req_model = (body.get("model") or "").strip()
+    req_model = body.get("model") or ""
+    if not isinstance(req_model, str):
+        return jsonify({"error": "model must be a string"}), 400
+    req_model = req_model.strip()
     if req_model:
         sess["model"] = req_model
     model: str = sess["model"]
@@ -222,7 +242,7 @@ def api_clear_history(session_id: str):
 # ──────────────────────────────────────────────────────────────
 def main():
     print("\n  \U0001F332  Vectorless RAG  —  http://localhost:5000\n")
-    app.run(debug=True, host="0.0.0.0", port=5000, threaded=True)
+    app.run(debug=False, host="127.0.0.1", port=5000, threaded=True)
 
 
 if __name__ == "__main__":

@@ -4,10 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Vectorless RAG — Document Intelligence</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
-<!-- marked.js for markdown rendering -->
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="{{ url_for('static', filename='markdown.js') }}"></script>
 <style>
   /* ── RESET & TOKENS ─────────────────────────────────────── */
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -26,8 +23,8 @@
     --text:      #d1dae8;
     --text2:     #8896aa;
     --text3:     #5a6677;
-    --mono:      'JetBrains Mono', monospace;
-    --sans:      'Syne', sans-serif;
+    --mono:      ui-monospace, 'Cascadia Code', monospace;
+    --sans:      system-ui, sans-serif;
   }
 
   html, body { height: 100%; overflow: hidden; }
@@ -679,7 +676,7 @@
     <div class="logo">
       <div class="logo-icon"></div>
       Vectorless RAG
-      <span class="logo-sub">No Vectors. Pure Reasoning.</span>
+      <span class="logo-sub">Local models. No embeddings.</span>
     </div>
     <div class="topbar-spacer"></div>
     <div class="model-select-wrap">
@@ -722,7 +719,7 @@
       </div>
     </div>
     <div class="tree-panel" id="treePanel">
-      <div class="tree-empty">Upload a PDF to see<br>the document tree here.</div>
+      <div class="tree-empty">Upload a document to see<br>the document tree here.</div>
     </div>
 
     <!-- Controls -->
@@ -739,13 +736,13 @@
     <div class="welcome" id="welcome">
       <div class="welcome-title">Ask anything about<br>your <span>document</span>.</div>
       <div class="welcome-sub">
-        No vector embeddings. The LLM navigates your document tree
-        like an expert scanning a table of contents.
+        Upload your PDF and ask questions about its contents.
+        Your local model retrieves document sections and includes source references.
       </div>
       <div class="welcome-steps">
-        <div class="step"><div class="step-num">1</div>Upload a PDF using the panel on the left</div>
+        <div class="step"><div class="step-num">1</div>Upload a document using the panel on the left</div>
         <div class="step"><div class="step-num">2</div>Select your Ollama model from the top bar</div>
-        <div class="step"><div class="step-num">3</div>Ask any question — get cited answers instantly</div>
+        <div class="step"><div class="step-num">3</div>Ask any question — get answers with source citations</div>
       </div>
     </div>
 
@@ -763,7 +760,7 @@
         ></textarea>
         <button class="send-btn" id="sendBtn" onclick="sendQuery()" disabled>▶</button>
       </div>
-      <div class="input-hint" id="inputHint">Upload a PDF to start chatting</div>
+      <div class="input-hint" id="inputHint">Upload a document to start chatting</div>
     </div>
   </main>
 </div>
@@ -787,7 +784,7 @@ async function loadModels() {
     sel.innerHTML = '';
     if (!d.models.length) {
       sel.innerHTML = '<option value="">No models found</option>';
-      showToast('No Ollama models found. Run: ollama pull llama3.2', 'error');
+      showToast('Start Ollama with an installed local model. See README for offline setup.', 'error');
       return;
     }
     d.models.forEach(m => {
@@ -821,6 +818,7 @@ fileInput.addEventListener('change', () => {
 });
 
 async function uploadFile(file) {
+  if (isStreaming) { showToast('Wait for the current answer before switching documents'); return; }
   const ok = /\.(pdf|txt|md|markdown|docx)$/i.test(file.name);
   if (!ok) {
     showToast('Supported: PDF, TXT, MD, DOCX', 'error'); return;
@@ -858,6 +856,7 @@ async function uploadFile(file) {
 
     if (d.error) { showToast(d.error, 'error'); prog.classList.remove('visible'); return; }
 
+    document.getElementById('messages').innerHTML = '';
     sessionId   = d.session_id;
     allSections = d.sections;
 
@@ -866,7 +865,7 @@ async function uploadFile(file) {
     document.getElementById('docName').textContent = d.filename;
     const fmt = (d.source_format || '').toUpperCase();
     document.getElementById('docMeta').textContent =
-      `${d.total_pages} pages · ${d.total_sections} sections` + (fmt ? ` · ${fmt}` : '');
+      `${d.total_pages} ${d.location_unit} · ${d.total_sections} sections` + (fmt ? ` · ${fmt}` : '');
     document.getElementById('sectionCount').textContent = d.total_sections;
 
     // Render tree
@@ -875,7 +874,7 @@ async function uploadFile(file) {
     // Enable chat
     document.getElementById('queryInput').disabled = false;
     document.getElementById('sendBtn').disabled = false;
-    document.getElementById('inputHint').textContent = 'Press Enter to send · Shift+Enter for new line';
+    document.getElementById('inputHint').textContent = `Source: ${d.filename} · Enter to send · Shift+Enter for new line`;
 
     // Show messages panel
     document.getElementById('welcome').style.display = 'none';
@@ -913,9 +912,7 @@ function renderTree(sections) {
     item.className = 'tree-item';
     item.id = 'tree_' + sec.section_id;
     item.style.setProperty('--depth', String(depth));
-    const pages = sec.page_start === sec.page_end
-      ? `p${sec.page_start}`
-      : `pp${sec.page_start}–${sec.page_end}`;
+    const pages = sec.location;
     item.innerHTML = `
       <div class="tree-item-title" title="${escHtml(sec.title)}">${escHtml(truncate(sec.title, 45))}</div>
       <div class="tree-item-meta">${sec.section_id} · ${pages}</div>`;
@@ -1039,7 +1036,7 @@ async function sendQuery() {
             }
             fullText += evt.data;
             const content = msgEl.querySelector('.msg-content');
-            content.innerHTML = marked.parse(fullText);
+            content.innerHTML = renderMarkdown(fullText);
             scrollMessages();
           }
 
@@ -1053,8 +1050,7 @@ async function sendQuery() {
               retrievedSections.forEach(s => {
                 const badge = document.createElement('span');
                 badge.className = 'source-badge';
-                const pages = s.page_start === s.page_end
-                  ? `p${s.page_start}` : `pp${s.page_start}–${s.page_end}`;
+                const pages = s.location;
                 badge.textContent = `${truncate(s.title, 25)} (${pages})`;
                 badge.title = s.preview;
                 badge.onclick = () => fillQuery(`Tell me more about "${s.title}"`);
@@ -1067,7 +1063,7 @@ async function sendQuery() {
 
           else if (evt.type === 'error') {
             const content = msgEl.querySelector('.msg-content');
-            content.innerHTML = `<span style="color:var(--red)">Error: ${evt.error}</span>`;
+            content.innerHTML = `<span style="color:var(--red)">Error: ${escHtml(evt.error)}</span>`;
             pb.style.width = '0%';
           }
 
@@ -1077,7 +1073,7 @@ async function sendQuery() {
 
   } catch (e) {
     const content = msgEl.querySelector('.msg-content');
-    content.innerHTML = `<span style="color:var(--red)">Error: ${e.message}</span>`;
+    content.innerHTML = `<span style="color:var(--red)">Error: ${escHtml(e.message)}</span>`;
   }
 
   isStreaming = false;
@@ -1106,7 +1102,7 @@ function appendMessage(role, text, thinking = false) {
         Searching document tree…
       </div>`;
   } else {
-    contentHtml = marked.parse(text || '');
+    contentHtml = renderMarkdown(text || '');
   }
 
   div.innerHTML = `
@@ -1130,7 +1126,7 @@ function fillQuery(text) {
 }
 
 function clearHistory() {
-  if (!sessionId) return;
+  if (!sessionId || isStreaming) return;
   fetch(`/api/session/${sessionId}/clear`, { method: 'POST' });
   document.getElementById('messages').innerHTML = '';
   document.querySelectorAll('.tree-item').forEach(el => el.classList.remove('highlighted'));
@@ -1138,7 +1134,7 @@ function clearHistory() {
 }
 
 function escHtml(str) {
-  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
 function truncate(str, n) {
